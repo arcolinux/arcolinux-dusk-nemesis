@@ -15,20 +15,33 @@ createworkspaces()
 	Monitor *m;
 	int i;
 
-	pws = selws = workspaces = createworkspace(0, &wsrules[0]);
+	/* find the floating layout for the sticky rule */
+	for (i = 0; i < LENGTH(layouts); i++)
+		if ((&layouts[i])->arrange == NULL)
+			break;
+
+	const WorkspaceRule stickywsrule = { .name = "Sticky", .layout = i };
+	stickyws = createworkspace(4096, &stickywsrule);
+	stickyws->visible = 1;
+	stickyws->mon = mons; // not sure about how to handle mon
+	stickyws->wh = 10000;
+	stickyws->ww = 10000;
+
+	stickyws->next = pws = selws = workspaces = createworkspace(0, &wsrules[0]);
 	for (i = 1; i < LENGTH(wsrules); i++)
 		pws = pws->next = createworkspace(i, &wsrules[i]);
 
 	num_workspaces = i;
 
 	for (m = mons, ws = workspaces; ws; ws = ws->next) {
-		if (ws->mon == NULL) {
+		if (ws->mon == NULL)
 			ws->mon = m;
-			ws->wx = m->wx;
-			ws->wy = m->wy;
-			ws->wh = m->wh;
-			ws->ww = m->ww;
-		}
+
+		ws->wx = ws->mon->wx;
+		ws->wy = ws->mon->wy;
+		ws->wh = ws->mon->wh;
+		ws->ww = ws->mon->ww;
+
 		if (m->selws == NULL) {
 			m->selws = ws;
 			m->selws->visible = 1;
@@ -36,12 +49,6 @@ createworkspaces()
 		m = (m->next == NULL ? mons : m->next);
 	}
 	setworkspaceareas();
-
-	const WorkspaceRule stickywsrule = { .name = "Sticky" };
-	stickyws = createworkspace(9999, &stickywsrule);
-	stickyws->visible = 1;
-	stickyws->next = workspaces;
-	stickyws->mon = mons; // not sure about how to handle mon
 }
 
 Workspace *
@@ -150,7 +157,7 @@ hasclients(Workspace *ws)
 	/* Check if the workspace has visible clients on it, intentionally not taking HIDDEN(c)
 	 * into account so that workspaces with hidden client windows are still marked as
 	 * having clients from a UI point of view */
-	for (c = ws->clients; c && (c->flags & Invisible); c = c->next);
+	for (c = ws->clients; c && ISINVISIBLE(c); c = c->next);
 	return c != NULL;
 }
 
@@ -170,7 +177,8 @@ void
 hidews(Workspace *ws)
 {
 	Workspace *w;
-	fprintf(stderr, "hidews called for ws %s\n", ws->name);
+	if (enabled(Debug))
+		fprintf(stderr, "hidews called for ws %s\n", ws->name);
 
 	ws->visible = 0;
 	hidewsclients(ws->stack);
@@ -202,6 +210,8 @@ hidews(Workspace *ws)
 void
 showws(Workspace *ws)
 {
+	if (enabled(Debug))
+		fprintf(stderr, "showws called for ws %s\n", ws->name);
 	ws->visible = 1;
 	selws = ws->mon->selws = ws;
 }
@@ -215,17 +225,19 @@ hidewsclients(Client *c)
 	/* hide clients bottom up */
 	hidewsclients(c->snext);
 	hide(c);
+
 	/* auto-hide scratchpads when moving to other workspaces */
-	if (enabled(AutoHideScratchpads) && c->scratchkey != 0 && !ISSTICKY(c))
-		addflag(c, Invisible);
+	if (enabled(AutoHideScratchpads) && c->win && c->scratchkey != 0 && !ISSTICKY(c)) {
+		if (SEMISCRATCHPAD(c) && c->swallowing)
+			swapsemiscratchpadclients(c, c->swallowing);
+		else
+			addflag(c, Invisible);
+	}
 }
 
 void
-showwsclients(Client *c)
+showwsclient(Client *c)
 {
-	if (!c)
-		return;
-
 	if (ISFLOATING(c) && ISVISIBLE(c)) {
 		if (NEEDRESIZE(c)) {
 			removeflag(c, NeedResize);
@@ -235,6 +247,14 @@ showwsclients(Client *c)
 		} else
 			show(c);
 	}
+}
+
+void
+showwsclients(Client *c)
+{
+	if (!c)
+		return;
+	showwsclient(c);
 	showwsclients(c->snext);
 }
 
@@ -288,7 +308,20 @@ swapwsclients(Workspace *ws1, Workspace *ws2)
 	attachstackx(c1, AttachBottom, ws2);
 	attachstackx(c2, AttachBottom, ws1);
 
-	arrange(NULL);
+	if (ws1->visible) {
+		showwsclients(c2);
+		arrangews(ws1);
+	} else
+		hidews(ws1);
+
+	if (ws2->visible) {
+		showwsclients(c1);
+		arrangews(ws2);
+	}
+	else
+		hidews(ws2);
+
+	drawbars();
 }
 
 void
@@ -365,8 +398,13 @@ moveallclientstows(Workspace *from, Workspace *to)
 
 	if (from->visible)
 		arrangews(from);
+	else
+		hidews(from);
+
 	if (to->visible)
 		arrangews(to);
+	else
+		hidews(to);
 
 	if (from->mon == to->mon)
 		drawbar(to->mon);
@@ -384,6 +422,12 @@ void
 movealltowsbyname(const Arg *arg)
 {
 	moveallclientstows(selws, getwsbyname(arg));
+}
+
+void
+moveallfromwsbyname(const Arg *arg)
+{
+	moveallclientstows(getwsbyname(arg), selws);
 }
 
 /* Send client to an adjacent workspace on the current monitor */

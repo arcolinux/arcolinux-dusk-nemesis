@@ -32,10 +32,13 @@ calc_wintitle_floating(
 ) {
 	Client *c;
 	int clientsnfloating = 0;
-	int groupactive = GRP_FLOAT;
+	int groupactive = ISFLOATING(ws->sel) ? GRP_FLOAT : 0;
+	firstpwlwintitle = 1;
 
 	for (c = ws->clients; c; c = c->next) {
 		if (!ISVISIBLE(c))
+			continue;
+		if (SKIPTASKBAR(c))
 			continue;
 		if (ISFLOATING(c))
 			clientsnfloating++;
@@ -59,6 +62,6 @@ calc_wintitle_floating(
 	XSetForeground(drw->dpy, drw->gc, scheme[bar->scheme][ColBorder].pixel);
 	XFillRectangle(drw->dpy, drw->drawable, drw->gc, a->x, a->y, a->w, a->h);
 
-	c = flextitledrawarea(ws, ws->clients, offx, tabw, clientsnfloating, SCHEMEFOR(GRP_FLOAT), 0, 0, 1, passx, tabfn, arg, a);
+	flextitledrawarea(ws, ws->clients, offx, tabw, clientsnfloating, SCHEMEFOR(GRP_FLOAT), 0, 0, 1, passx, tabfn, arg, a);
 	return 1;
 }

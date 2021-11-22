@@ -35,8 +35,14 @@ calc_wintitle_sticky(
 	Client *c;
 	int clientsnsticky = 0;
 	int groupactive = GRP_FLOAT;
+	firstpwlwintitle = 1;
 
-	for (c = ws->clients; c; c = c->next, clientsnsticky++);
+	for (c = ws->clients; c; c = c->next) {
+		if (SKIPTASKBAR(c))
+			continue;
+		clientsnsticky++;
+	}
+
 	if (!clientsnsticky)
 		return 0;
 
@@ -55,6 +61,6 @@ calc_wintitle_sticky(
 	XSetForeground(drw->dpy, drw->gc, scheme[bar->scheme][ColBorder].pixel);
 	XFillRectangle(drw->dpy, drw->drawable, drw->gc, a->x, a->y, a->w, a->h);
 
-	c = flextitledrawarea(ws, ws->clients, offx, tabw, clientsnsticky, SCHEMEFOR(GRP_FLOAT), 0, 1, 1, passx, tabfn, arg, a);
+	flextitledrawarea(ws, ws->clients, offx, tabw, clientsnsticky, SCHEMEFOR(GRP_FLOAT), 0, 1, 1, passx, tabfn, arg, a);
 	return 1;
 }

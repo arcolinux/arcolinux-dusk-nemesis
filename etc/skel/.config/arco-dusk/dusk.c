@@ -54,7 +54,7 @@
 #define Button7                 7
 #define Button8                 8
 #define Button9                 9
-#define BARRULES                30
+#define BARRULES                50
 #define NUM_STATUSES            10
 #define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)
 #define CLEANMASK(mask)         (mask & ~(numlockmask|LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
@@ -173,12 +173,14 @@ enum {
 	NetWMDesktop,
 	NetWMFullPlacement,
 	NetWMFullscreen,
+	NetWMHidden,
 	NetWMIcon,
 	NetWMName,
 	NetWMState,
 	NetWMStateAbove,
 	NetWMMaximizedVert,
 	NetWMMaximizedHorz,
+	NetWMSkipTaskbar,
 	NetWMStaysOnTop,
 	NetWMSticky,
 	NetWMWindowOpacity,
@@ -287,6 +289,7 @@ struct Client {
 	Client *next;
 	Client *snext;
 	Client *swallowing;
+	Client *linked;
 	Workspace *ws;
 	Workspace *revertws; /* holds the original workspace info from when the client was opened */
 	Window win;
@@ -422,6 +425,7 @@ static void detach(Client *c);
 static void detachstack(Client *c);
 static Monitor *dirtomon(int dir);
 static Workspace *dirtows(int dir);
+static void entermon(Monitor *m, Client *next);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
@@ -449,6 +453,7 @@ static void motionnotify(XEvent *e);
 static void movemouse(const Arg *arg);
 static void moveorplace(const Arg *arg);
 static Client *nexttiled(Client *c);
+static Client *nthtiled(Client *c, int n);
 static void placemouse(const Arg *arg);
 static Client *prevtiled(Client *c);
 static void propertynotify(XEvent *e);
@@ -853,8 +858,11 @@ cleanupmon(Monitor *mon)
 	}
 	for (ws = workspaces; ws; ws = ws->next)
 		if (ws->mon == mon) {
+			adjustwsformonitor(ws, mons);
 			ws->mon = mons;
 			ws->visible = 0;
+			ws->pinned = 0;
+			hidewsclients(ws->stack);
 		}
 	for (bar = mon->bar; bar; bar = mon->bar) {
 		if (!bar->external) {
@@ -997,6 +1005,24 @@ clientmessage(XEvent *e)
 				setflag(c, Urgent, 1);
 				drawbar(c->ws->mon);
 			}
+		} else if (isatomstate(cme, netatom[NetWMHidden])) {
+			switch (cme->data.l[0]) {
+			default:
+			case 0: /* _NET_WM_STATE_REMOVE */
+				reveal(c);
+				break;
+			case 1: /* _NET_WM_STATE_ADD */
+				conceal(c);
+				break;
+			case 2: /* _NET_WM_STATE_TOGGLE */
+				if (HIDDEN(c))
+					reveal(c);
+				else
+					conceal(c);
+				break;
+			}
+		} else if (isatomstate(cme, netatom[NetWMSkipTaskbar])) {
+			toggleflagop(c, SkipTaskbar, cme->data.l[0]);
 		} else if (isatomstate(cme, netatom[NetWMStaysOnTop])) {
 			toggleflagop(c, AlwaysOnTop, cme->data.l[0]);
 		} else if (isatomstate(cme, netatom[NetWMSticky])) {
@@ -1076,9 +1102,7 @@ clientmonresize(Client *c, Monitor *from, Monitor *to)
 	if (!restorewindowfloatposition(c, to))
 		clientrelposmon(c, from, to, &c->sfx, &c->sfy, &c->sfw, &c->sfh);
 
-	if (ISFLOATING(c) && (!ISFULLSCREEN(c) || ISFAKEFULLSCREEN(c)))
-		clientrelposmon(c, from, to, &c->x, &c->y, &c->w, &c->h);
-	else
+	if (ISFULLSCREEN(c) && !ISFAKEFULLSCREEN(c))
 		clientrelposmon(c, from, to, &c->oldx, &c->oldy, &c->oldw, &c->oldh);
 }
 
@@ -1216,6 +1240,7 @@ configurenotify(XEvent *e)
 		if (updategeom() || dirty) {
 			drw_resize(drw, sw, sh);
 			updatebars();
+			setviewport();
 			for (ws = workspaces; ws; ws = ws->next)
 				for (c = ws->clients; c; c = c->next)
 					if (ISFULLSCREEN(c) && !ISFAKEFULLSCREEN(c))
@@ -1285,6 +1310,7 @@ configurerequest(XEvent *e)
 				XMoveResizeWindow(dpy, c->win, c->x, c->y, c->w, c->h);
 			else
 				addflag(c, NeedResize);
+			savefloats(c);
 		} else
 			configure(c);
 	} else {
@@ -1416,10 +1442,27 @@ dirtows(int dir)
 }
 
 void
+entermon(Monitor *m, Client *next)
+{
+	Client *sel = selws->sel;
+	selmon = m;
+	if (m->selws) {
+		if (!next)
+			next = m->selws->sel;
+		selws = m->selws;
+		updatecurrentdesktop();
+	}
+	if (sel) {
+		unfocus(sel, 1, next);
+		if (!next || sel->ws->mon != next->ws->mon)
+			drawbar(sel->ws->mon);
+	}
+}
+
+void
 enternotify(XEvent *e)
 {
-	Client *c, *sel;
-	Workspace *ws = selws;
+	Client *c;
 	Monitor *m;
 	XCrossingEvent *ev = &e->xcrossing;
 
@@ -1427,17 +1470,9 @@ enternotify(XEvent *e)
 		return;
 	c = wintoclient(ev->window);
 	m = c ? c->ws->mon : wintomon(ev->window);
-	if (m != selmon) {
-		sel = ws->sel;
-		selmon = m;
-		if (m->selws) {
-			selws = m->selws;
-			updatecurrentdesktop();
-		}
-		if (sel)
-			unfocus(sel, 1, c);
-		drawbars();
-	} else if (selws == m->selws && (!c || (m->selws && c == m->selws->sel)))
+	if (m != selmon)
+		entermon(m, c);
+	else if (selws == m->selws && (!c || (m->selws && c == m->selws->sel)))
 		return;
 
 	focus(c);
@@ -1879,6 +1914,9 @@ manage(Window w, XWindowAttributes *wa)
 	getclientfields(c);
 	getclientopacity(c);
 
+	if (ISSTICKY(c))
+		c->ws = recttows(c->x + c->w / 2, c->y + c->h / 2, 1, 1);
+
 	if (!c->ws) {
 		if (XGetTransientForHint(dpy, w, &trans) && (t = wintoclient(trans))) {
 			addflag(c, Transient);
@@ -1911,9 +1949,6 @@ manage(Window w, XWindowAttributes *wa)
 
 	if (!ISTRANSIENT(c))
 		term = termforwin(c);
-
-	if (term)
-		c->ws = term->ws;
 
 	if (ISSTICKY(c)) {
 		stickyws->next = c->ws;
@@ -2002,7 +2037,6 @@ manage(Window w, XWindowAttributes *wa)
 		(unsigned char *) &(c->win), 1);
 	XChangeProperty(dpy, root, netatom[NetClientListStacking], XA_WINDOW, 32, PropModePrepend,
 		(unsigned char *) &(c->win), 1);
-	XMoveResizeWindow(dpy, c->win, c->x + 2 * sw, c->y, c->w, c->h); /* some windows require this */
 
 	setclientstate(c, NormalState);
 
@@ -2014,7 +2048,8 @@ manage(Window w, XWindowAttributes *wa)
 	}
 
 	if (!c->swallowing) {
-		if (riopid && (RIODRAWNOMATCHPID(c) || isdescprocess(riopid, c->pid))) {
+		if (riopid && (riopid == 1 || RIODRAWNOMATCHPID(c) || isdescprocess(riopid, c->pid))) {
+			riopid = 0;
 			if (riodimensions[3] != -1)
 				rioposition(c, riodimensions[0], riodimensions[1], riodimensions[2], riodimensions[3]);
 			else {
@@ -2029,6 +2064,9 @@ manage(Window w, XWindowAttributes *wa)
 	}
 
 	arrange(c->ws);
+
+	if (ISFLOATING(c))
+		XMoveResizeWindow(dpy, c->win, c->x, c->y, c->w, c->h);
 	if (ISVISIBLE(c))
 		show(c);
 	else
@@ -2044,7 +2082,13 @@ manage(Window w, XWindowAttributes *wa)
 		XRaiseWindow(dpy, c->win);
 
 	setfloatinghint(c);
-	fprintf(stderr, "manage <-- (%s)\n", c->name);
+	if (SEMISCRATCHPAD(c) && c->scratchkey)
+		initsemiscratchpad(c);
+
+	if (!c->ws->visible)
+		drawbar(c->ws->mon);
+
+	fprintf(stderr, "manage <-- (%s) on workspace %s\n", c->name, c->ws->name);
 }
 
 void
@@ -2106,6 +2150,8 @@ motionnotify(XEvent *e)
 
 	/* Mouse cursor moves over a bar, trigger bar hover mechanisms */
 	if (bar) {
+		if (bar->mon != selmon)
+			entermon(bar->mon, NULL);
 		barhover(e, bar);
 		return;
 	}
@@ -2120,26 +2166,24 @@ motionnotify(XEvent *e)
 
 	/* Mouse cursor moves from one workspace to another */
 	if ((ws = recttows(ev->x_root, ev->y_root, 1, 1)) && ws != selws) {
-		sel = selws->sel;
-		selws = ws;
-		selmon = ws->mon;
-		selmon->selws = ws;
-		unfocus(sel, 1, NULL);
-		focus(NULL);
-		drawbar(selmon);
-		updatecurrentdesktop();
+		if (selmon != ws->mon) {
+			entermon(ws->mon, NULL);
+		} else {
+			sel = selws->sel;
+			selws = ws;
+			selmon->selws = ws;
+			unfocus(sel, 1, NULL);
+			focus(NULL);
+			drawbar(selmon);
+			updatecurrentdesktop();
+		}
 		return;
 	}
 
 	/* Mouse cursor moves from one monitor to another */
 	if ((m = recttomon(ev->x_root, ev->y_root, 1, 1)) != selmon) {
-		sel = selws->sel;
-		selmon = m;
-		if (m->selws)
-			selws = m->selws;
-		unfocus(sel, 1, NULL);
+		entermon(m, NULL);
 		focus(NULL);
-		updatecurrentdesktop();
 	}
 }
 
@@ -2365,6 +2409,16 @@ nexttiled(Client *c)
 }
 
 Client *
+nthtiled(Client *c, int n)
+{
+	int i;
+	for (i = 0; c && i < n; c = c->next)
+		if (!ISFLOATING(c) && ISVISIBLE(c))
+			i++;
+	return c;
+}
+
+Client *
 prevtiled(Client *c)
 {
 	Client *p, *r;
@@ -2464,7 +2518,6 @@ restart(const Arg *arg)
 		persistworkspacestate(ws);
 	persistworkspacestate(stickyws);
 }
-
 
 void
 quit(const Arg *arg)
@@ -3008,6 +3061,9 @@ setup(void)
 
 	enablefunc(functionality);
 
+	if (enabled(Xresources))
+		loadxrdb();
+
 	/* init screen */
 	screen = DefaultScreen(dpy);
 	sw = DisplayWidth(dpy, screen);
@@ -3053,13 +3109,15 @@ setup(void)
 	netatom[NetSystemTrayVisual] = XInternAtom(dpy, "_NET_SYSTEM_TRAY_VISUAL", False);
 	netatom[NetWMAllowedActions] = XInternAtom(dpy, "_NET_WM_ALLOWED_ACTIONS", False);
 	netatom[NetWMCheck] = XInternAtom(dpy, "_NET_SUPPORTING_WM_CHECK", False);
-	netatom[NetWMDemandsAttention] = XInternAtom(dpy, "_NET_WM_DEMANDS_ATTENTION", False);
+	netatom[NetWMDemandsAttention] = XInternAtom(dpy, "_NET_WM_STATE_DEMANDS_ATTENTION", False);
 	netatom[NetWMDesktop] = XInternAtom(dpy, "_NET_WM_DESKTOP", False);
 	netatom[NetWMFullPlacement] = XInternAtom(dpy, "_NET_WM_FULL_PLACEMENT", False); /* https://specifications.freedesktop.org/wm-spec/latest/ar01s07.html */
 	netatom[NetWMFullscreen] = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
+	netatom[NetWMHidden] = XInternAtom(dpy, "_NET_WM_STATE_HIDDEN", False);
 	netatom[NetWMIcon] = XInternAtom(dpy, "_NET_WM_ICON", False);
 	netatom[NetWMMaximizedVert] = XInternAtom(dpy, "_NET_WM_STATE_MAXIMIZED_VERT", False);
 	netatom[NetWMMaximizedHorz] = XInternAtom(dpy, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+	netatom[NetWMSkipTaskbar] = XInternAtom(dpy, "_NET_WM_STATE_SKIP_TASKBAR", False);
 	netatom[NetWMStaysOnTop] = XInternAtom(dpy, "_NET_WM_STATE_STAYS_ON_TOP", False);
 	netatom[NetWMSticky] = XInternAtom(dpy, "_NET_WM_STATE_STICKY", False);
 	netatom[NetWMMoveResize] = XInternAtom(dpy, "_NET_WM_MOVERESIZE", False);
@@ -3359,7 +3417,8 @@ unfocus(Client *c, int setfocus, Client *nextfocus)
 		XSetInputFocus(dpy, root, RevertToPointerRoot, CurrentTime);
 		XDeleteProperty(dpy, root, netatom[NetActiveWindow]);
 	}
-	XSetWindowBorder(dpy, c->win, scheme[c->scheme][ColBorder].pixel);
+	if (!ISMARKED(c))
+		XSetWindowBorder(dpy, c->win, scheme[c->scheme][ColBorder].pixel);
 	c->ws->sel = NULL;
 }
 
@@ -3367,9 +3426,14 @@ void
 unmanage(Client *c, int destroyed)
 {
 	Client *s;
-	Workspace *ws = c->ws;
-	Workspace *revertws = c->revertws;
+	Workspace *ws, *revertws;
 	XWindowChanges wc;
+
+	if (SEMISCRATCHPAD(c))
+		c = unmanagesemiscratchpad(c);
+
+	ws = c->ws;
+	revertws = c->revertws;
 
 	if (c->swallowing)
 		unswallow(c);
@@ -3670,6 +3734,7 @@ wintomon(Window w)
 				return m;
 	if ((c = wintoclient(w)))
 		return c->ws->mon;
+
 	return selmon;
 }
 
@@ -3773,9 +3838,6 @@ main(int argc, char *argv[])
 
 	checkotherwm();
 	XrmInitialize(); // needed for xrdb / Xresources
-	if (enabled(Xresources)) {
-		loadxrdb();
-	}
 	autostart_exec();
 	setup();
 #ifdef __OpenBSD__
