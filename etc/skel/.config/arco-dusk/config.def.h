@@ -386,7 +386,9 @@ static char *colors[][ColCount] = {
 };
 
 static const char *const autostart[] = {
-	"st", NULL,
+	/*"st", NULL,
+	"thunar", NULL,*/
+	"arcolinux-autostart-dusk", NULL, // apps to start /usr/share/local/bin
 	NULL /* terminate */
 };
 
