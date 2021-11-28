@@ -424,6 +424,9 @@ static const Rule clientrules[] = {
 	 *	_NET_WM_WINDOW_TYPE(ATOM) = wintype
 	 */
 	{ .class = "plasmashell", .flags = Disallowed },
+	{ .class = "yakuake", .flags = Disallowed },
+	{ .class = "konqueror", .flags = Disallowed },
+	
 	{ .class = "Arcologout.py", .flags = AlwaysOnTop|Centered },
 	{ .wintype = WTYPE "DESKTOP", .flags = Unmanaged|Lower },
 	{ .wintype = WTYPE "DOCK", .flags = Unmanaged|Raise },
