@@ -209,6 +209,7 @@ enum {
 
 enum {
 	WMChangeState,
+	WMClass,
 	WMDelete,
 	WMProtocols,
 	WMState,
@@ -274,6 +275,7 @@ typedef struct Workspace Workspace;
 typedef struct Client Client;
 struct Client {
 	char name[256];
+	char label[32];
 	float mina, maxa;
 	float cfact;
 	int x, y, w, h;
@@ -1092,7 +1094,7 @@ clientmessage(XEvent *e)
 void
 clientmonresize(Client *c, Monitor *from, Monitor *to)
 {
-	if (!c || from == to)
+	if (!c || from == to || ISSTICKY(c))
 		return;
 
 	if (c->sfx == -9999)
@@ -1226,7 +1228,7 @@ configurenotify(XEvent *e)
 	Client *c;
 	XConfigureEvent *ev = &e->xconfigure;
 	int dirty;
-	/* TODO: updategeom handling sucks, needs to be simplified */
+
 	if (ev->window == root) {
 
 		if (enabled(Debug)) {
@@ -1235,8 +1237,9 @@ configurenotify(XEvent *e)
 		}
 
 		dirty = (sw != ev->width || sh != ev->height);
-		sw = ev->width;
-		sh = ev->height;
+		stickyws->ww = sw = ev->width;
+		stickyws->wh = sh = ev->height;
+
 		if (updategeom() || dirty) {
 			drw_resize(drw, sw, sh);
 			updatebars();
@@ -1465,7 +1468,6 @@ enternotify(XEvent *e)
 	Client *c;
 	Monitor *m;
 	XCrossingEvent *ev = &e->xcrossing;
-
 	if ((ev->mode != NotifyNormal || ev->detail == NotifyInferior) && ev->window != root)
 		return;
 	c = wintoclient(ev->window);
@@ -1913,6 +1915,7 @@ manage(Window w, XWindowAttributes *wa)
 	getclientflags(c);
 	getclientfields(c);
 	getclientopacity(c);
+	saveclientclass(c);
 
 	if (ISSTICKY(c))
 		c->ws = recttows(c->x + c->w / 2, c->y + c->h / 2, 1, 1);
@@ -1934,6 +1937,11 @@ manage(Window w, XWindowAttributes *wa)
 
 		if (!ISTRANSIENT(c))
 			applyrules(c);
+	}
+
+	if (DISALLOWED(c)) {
+		killclient(&((Arg) { .v = c }));
+		return;
 	}
 
 	if (ISUNMANAGED(c)) {
@@ -2165,7 +2173,7 @@ motionnotify(XEvent *e)
 		return;
 
 	/* Mouse cursor moves from one workspace to another */
-	if ((ws = recttows(ev->x_root, ev->y_root, 1, 1)) && ws != selws) {
+	if (!ISSTICKY(selws->sel) && (ws = recttows(ev->x_root, ev->y_root, 1, 1)) && ws != selws) {
 		if (selmon != ws->mon) {
 			entermon(ws->mon, NULL);
 		} else {
@@ -2181,7 +2189,7 @@ motionnotify(XEvent *e)
 	}
 
 	/* Mouse cursor moves from one monitor to another */
-	if ((m = recttomon(ev->x_root, ev->y_root, 1, 1)) != selmon) {
+	if (!ISSTICKY(selws->sel) && (m = recttomon(ev->x_root, ev->y_root, 1, 1)) != selmon) {
 		entermon(m, NULL);
 		focus(NULL);
 	}
@@ -2261,7 +2269,11 @@ movemouse(const Arg *arg)
 	} while (ev.type != ButtonRelease);
 	XUngrabPointer(dpy, CurrentTime);
 
-	if (!ISSTICKY(c) && (w = recttows(c->x, c->y, c->w, c->h)) && w != selws) {
+	w = recttows(c->x, c->y, c->w, c->h);
+	if (w && ISSTICKY(c)) {
+		stickyws->mon = w->mon;
+		drawbars();
+	} else if (w && w != selws) {
 		detach(c);
 		detachstack(c);
 		attachx(c, AttachBottom, w);
@@ -2503,6 +2515,9 @@ propertynotify(XEvent *e)
 			updateicon(c);
 			if (c == selws->sel)
 				drawbar(selws->mon);
+		} else if (ev->atom == wmatom[WMClass]) {
+			saveclientclass(c);
+			drawbars();
 		}
 	}
 }
@@ -3059,6 +3074,8 @@ setup(void)
 	signal(SIGHUP, sighup);
 	signal(SIGTERM, sigterm);
 
+	putenv("_JAVA_AWT_WM_NONREPARENTING=1");
+
 	enablefunc(functionality);
 
 	if (enabled(Xresources))
@@ -3077,11 +3094,16 @@ setup(void)
 	lrpad = drw->fonts->h + horizpadbar;
 	bh = bar_height ? bar_height : drw->fonts->h + vertpadbar;
 
+	/* One off calculating workspace label widths, used by WorkspaceLabels functionality */
+	occupied_workspace_label_format_length = TEXT2DW(occupied_workspace_label_format) - TEXTW(workspace_label_placeholder) * 2;
+	vacant_workspace_label_format_length = TEXT2DW(vacant_workspace_label_format) - TEXTW(workspace_label_placeholder);
+
 	updategeom();
 	createworkspaces();
 
 	/* init atoms */
 	utf8string = XInternAtom(dpy, "UTF8_STRING", False);
+	wmatom[WMClass] = XInternAtom(dpy, "WM_CLASS", False);
 	wmatom[WMProtocols] = XInternAtom(dpy, "WM_PROTOCOLS", False);
 	wmatom[WMDelete] = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
 	wmatom[WMState] = XInternAtom(dpy, "WM_STATE", False);
