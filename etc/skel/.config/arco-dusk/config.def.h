@@ -423,6 +423,14 @@ static const Rule clientrules[] = {
 	 *	WM_WINDOW_ROLE(STRING) = role
 	 *	_NET_WM_WINDOW_TYPE(ATOM) = wintype
 	 */
+
+	/* 
+	 * Combining Plasma and Dusk seems a challenge
+	 * Add more apps to the list to avoid the autostart in Dusk
+	 * Find the name with xprop in a terminal 
+	 * and select the application
+	*/
+	
 	{ .class = "plasmashell", .flags = Disallowed },
 	{ .class = "yakuake", .flags = Disallowed },
 	{ .class = "konqueror", .flags = Disallowed },
