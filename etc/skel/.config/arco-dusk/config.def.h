@@ -111,7 +111,7 @@ static int flexwintitle_separator        = 0;  // width of client separator
 static const char *fonts[]               = { "monospace:size=10" };
 static const char dmenufont[]            = "monospace:size=10";
 
-static char dmenunormfgcolor[] = "#BE89AE";
+static char dmenunormfgcolor[] = "#C6BDBD";
 static char dmenunormbgcolor[] = "#180A13";
 static char dmenuselfgcolor[] = "#FFF7D4";
 static char dmenuselbgcolor[] = "#440000";
