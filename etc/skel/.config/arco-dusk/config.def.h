@@ -198,15 +198,13 @@ static char *colors[SchemeLast][4] = {
 /* List of programs to start automatically during startup only. Note that these will not be
  * executed again when doing a restart. */
 static const char *const autostart[] = {
-	/* "st", NULL, */
-	NULL /* terminate */
+	"arcolinux-autostart-dusk",
 };
 
 /* List of programs to start automatically during a restart only. These should usually be short
  * scripts that perform specific operations, e.g. changing a wallpaper. */
 static const char *const autorestart[] = {
-	"arcolinux-autostart-dusk", NULL, // apps to start /usr/share/local/bin
-	NULL /* terminate */
+	"arcolinux-autostart-dusk",
 };
 
 /* There are two options when it comes to per-client rules:
