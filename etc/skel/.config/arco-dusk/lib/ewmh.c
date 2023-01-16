@@ -63,6 +63,7 @@ persistworkspacestate(Workspace *ws)
 		setclientflags(c);
 		setclientfields(c);
 		setclientlabel(c);
+		setclienticonpath(c);
 		savewindowfloatposition(c, c->ws->mon);
 
 		s = c->swallowing;
@@ -71,6 +72,7 @@ persistworkspacestate(Workspace *ws)
 			setclientflags(s);
 			setclientfields(s);
 			setclientlabel(s);
+			setclienticonpath(s);
 			savewindowfloatposition(s, s->ws->mon);
 			s = s->swallowing;
 		}
@@ -190,6 +192,15 @@ setclientfields(Client *c)
 }
 
 void
+setclienticonpath(Client *c)
+{
+	if (!strlen(c->iconpath))
+		return;
+
+	XChangeProperty(dpy, c->win, clientatom[DuskClientIconPath], XA_STRING, 8, PropModeReplace, (unsigned char *)c->iconpath, strlen(c->iconpath));
+}
+
+void
 setclientlabel(Client *c)
 {
 	XChangeProperty(dpy, c->win, clientatom[DuskClientLabel], XA_STRING, 8, PropModeReplace, (unsigned char *)c->label, strlen(c->label));
@@ -248,6 +259,28 @@ getclientfields(Client *c)
 }
 
 void
+getclienticonpath(Client *c)
+{
+	Atom type;
+	int format;
+	unsigned int i;
+	unsigned long after;
+	unsigned char *data = 0;
+	long unsigned int size = LENGTH(c->iconpath);
+
+	if (XGetWindowProperty(dpy, c->win, clientatom[DuskClientIconPath], 0, 1024, 0, XA_STRING,
+				&type, &format, &size, &after, &data) == Success) {
+		if (data) {
+			if (type == XA_STRING) {
+				for (i = 0; i < size; ++i)
+					c->iconpath[i] = data[i];
+			}
+			XFree(data);
+		}
+	}
+}
+
+void
 getclientlabel(Client *c)
 {
 	Atom type;
@@ -274,15 +307,30 @@ getworkspacestate(Workspace *ws)
 {
 	Monitor *m;
 	const Layout *layout;
-	int i, di, mon;
+	int i, di, mon, num_ws = 0;
 	unsigned long dl, nitems;
 	unsigned char *p = NULL;
 	Atom da, settings = None;
 
-	if (!(XGetWindowProperty(dpy, root, clientatom[DuskWorkspace], ws->num, LENGTH(wsrules) * sizeof dl,
+	if (XGetWindowProperty(dpy, root, netatom[NetNumberOfDesktops], 0L, sizeof da,
+			False, AnyPropertyType, &da, &di, &nitems, &dl, &p) == Success && p) {
+		num_ws = *(Atom *)p;
+		XFree(p);
+	}
+
+	if (ws->num > num_ws)
+		return;
+
+	if (!(XGetWindowProperty(dpy, root, clientatom[DuskWorkspace], ws->num, num_ws * sizeof dl,
 			False, AnyPropertyType, &da, &di, &nitems, &dl, &p) == Success && p)) {
 		return;
 	}
+
+	/* If the root window has the _DUSK_WORKSPACES property, which is confirmed by the above if
+	 * statement, then we do not want to trigger autostart of applications. This is only to happen
+	 * during the initial startup and not as part of restarts. The autostart_startup variable is
+	 * defined in lib/autostart.c */
+	autostart_startup = 0;
 
 	if (nitems) {
 		settings = *(Atom *)p;
@@ -316,7 +364,7 @@ getworkspacestate(Workspace *ws)
 					&& layout->arrange == NULL)
 				) {
 					ws->layout = layout;
-					strncpy(ws->ltsymbol, ws->layout->symbol, sizeof ws->ltsymbol);
+					strlcpy(ws->ltsymbol, ws->layout->symbol, sizeof ws->ltsymbol);
 					break;
 				}
 			}
