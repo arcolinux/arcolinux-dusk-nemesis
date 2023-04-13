@@ -396,6 +396,7 @@ static Client *prevtiled(Client *c);
 static void propertynotify(XEvent *e);
 static void restart(const Arg *arg);
 static void quit(const Arg *arg);
+static void raiseclient(Client *c);
 static void readclientstackingorder(void);
 static Monitor *recttomon(int x, int y, int w, int h);
 static Workspace *recttows(int x, int y, int w, int h);
@@ -416,7 +417,6 @@ static void setmfact(const Arg *arg);
 static void setup(void);
 static void seturgent(Client *c, int urg);
 static void show(Client *c);
-static void sigchld(int unused);
 static void skipfocusevents(void);
 static void spawn(const Arg *arg);
 static pid_t spawncmd(const Arg *arg, int buttonclick, int orphan);
@@ -461,6 +461,12 @@ static int monitorchanged = 0; /* used for combo logic */
 static int grp_idx = 0;        /* used for grouping windows together */
 static int arrange_focus_on_monocle = 1; /* used in focus to arrange monocle layouts on focus */
 
+/* Used by propertynotify to throttle repeating notifications */
+static int pn_prev_state = 0;
+static Window pn_prev_win = 0;
+static Atom pn_prev_atom = None;
+static unsigned int pn_prev_count = 0;
+
 static int (*xerrorxlib)(Display *, XErrorEvent *);
 static unsigned int numlockmask = 0;
 static void (*handler[LASTEvent]) (XEvent *) = {
@@ -482,7 +488,7 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 	[ResizeRequest] = resizerequest,
 	[UnmapNotify] = structurenotify,
 };
-static Atom wmatom[WMLast], netatom[NetLast], allowed[NetWMActionLast], xatom[XLast], clientatom[ClientLast];
+static Atom wmatom[WMLast], netatom[NetLast], allowed[NetWMActionLast], xatom[XLast], duskatom[DuskLast];
 static int running = 1;
 static Cur *cursor[CurLast];
 static Clr **scheme;
@@ -522,7 +528,7 @@ applyrules(Client *c)
 	class    = ch.res_class ? ch.res_class : broken;
 	instance = ch.res_name  ? ch.res_name  : broken;
 	gettextprop(c->win, wmatom[WMWindowRole], role, sizeof(role));
-	game_id = getatomprop(c, clientatom[SteamGameID], AnyPropertyType);
+	game_id = getatomprop(c, duskatom[SteamGameID], AnyPropertyType);
 	transient = ISTRANSIENT(c) ? 1 : 0;
 
 	/* Steam games may come through with custom class, instance and name making it hard to create
@@ -540,7 +546,7 @@ applyrules(Client *c)
 		&& (!r->role || strstr(role, r->role))
 		&& (!r->instance || strstr(instance, r->instance))
 		&& (!r->wintype || atomin(XInternAtom(dpy, r->wintype, False), win_types, nitems))
-		&& (r->transient == transient))
+		&& (r->transient == -1 || r->transient == transient))
 		{
 			c->flags |= Ruled | r->flags;
 			c->scratchkey = r->scratchkey;
@@ -693,7 +699,7 @@ reapplyrules(Client *c)
 		setflag(c, FullScreen, 0);
 		setfullscreen(c, 1, 0);
 	} else if (ISFLOATING(c)) {
-		XRaiseWindow(dpy, c->win);
+		raiseclient(c);
 		XMoveResizeWindow(dpy, c->win, c->x, c->y, c->w, c->h);
 		savefloats(c);
 	}
@@ -701,7 +707,7 @@ reapplyrules(Client *c)
 	if (LOWER(c))
 		XLowerWindow(dpy, c->win);
 	else if (RAISE(c))
-		XRaiseWindow(dpy, c->win);
+		raiseclient(c);
 
 	updateclientdesktop(c);
 	updatewmhints(c);
@@ -849,6 +855,7 @@ buttonpress(XEvent *e)
 	Workspace *ws;
 	XButtonPressedEvent *ev = &e->xbutton;
 	click = ClkRootWin;
+
 	/* focus monitor if necessary */
 	if ((m = wintomon(ev->window)) && m != selmon) {
 		ws = m->selws;
@@ -899,6 +906,12 @@ cleanup(void)
 	for (ws = workspaces; ws; ws = ws->next)
 		persistworkspacestate(ws);
 	persistworkspacestate(stickyws);
+
+	if (restartwm) {
+		persistpids();
+	} else {
+		autostart_killpids();
+	}
 
 	for (ws = workspaces; ws; ws = ws->next) {
 		ws->layout = &foo;
@@ -1143,7 +1156,9 @@ clientmessage(XEvent *e)
 				switch (cme->data.l[0]) {
 				default:
 				case 0: /* _NET_WM_STATE_REMOVE */
-					restorefloats(c);
+					if (ISFLOATING(c) || !c->ws->layout->arrange) {
+						restorefloats(c);
+					}
 					break;
 				case 1: /* _NET_WM_STATE_ADD */
 				case 2: /* _NET_WM_STATE_TOGGLE */
@@ -1158,18 +1173,23 @@ clientmessage(XEvent *e)
 		if ((ws = getwsbyindex(cme->data.l[0])))
 			movetows(c, ws, enabled(ViewOnWs));
 	} else if (cme->message_type == netatom[NetActiveWindow]) {
-		if (HIDDEN(c)) {
-			reveal(c);
-			arrange(c->ws);
-			drawbar(c->ws->mon);
-		}
 		if (enabled(FocusOnNetActive) && !NOFOCUSONNETACTIVE(c)) {
-			if (c->ws->visible)
+			if (ISINVISIBLE(c) && c->scratchkey) {
+				togglescratch(&((Arg) {.v = (const char*[]){ &c->scratchkey, NULL } }));
+			}
+			if (HIDDEN(c)) {
+				reveal(c);
+				arrange(c->ws);
+				drawbar(c->ws->mon);
+			}
+			if (c->ws->visible) {
 				focus(c);
-			else
+			} else {
 				viewwsonmon(c->ws, c->ws->mon, 0);
-		} else if (c != selws->sel && !ISURGENT(c))
+			}
+		} else if (c != selws->sel && !ISURGENT(c)) {
 			seturgent(c, 1);
+		}
 	} else if (cme->message_type == wmatom[WMChangeState]) {
 		if (cme->data.l[0] == IconicState) {
 			/* Some applications assume that setting the IconicState a second
@@ -1349,6 +1369,13 @@ configure(Client *c)
 	ce.width = c->w;
 	ce.height = c->h;
 	ce.border_width = c->bw;
+
+	if (noborder(c)) {
+		ce.width += c->bw * 2;
+		ce.height += c->bw * 2;
+		ce.border_width = 0;
+	}
+
 	ce.above = None;
 	ce.override_redirect = False;
 	XSendEvent(dpy, c->win, False, StructureNotifyMask, (XEvent *)&ce);
@@ -1675,6 +1702,7 @@ focus(Client *c)
 
 	Workspace *ws = c ? c->ws : selws;
 	Client *f;
+	Bar *bar;
 	XWindowChanges wc;
 
 	if (!c || ISINVISIBLE(c))
@@ -1699,10 +1727,12 @@ focus(Client *c)
 
 		if (ISURGENT(c))
 			seturgent(c, 0);
+
 		detachstack(c);
 		attachstack(c);
 		grabbuttons(c, 1);
 		setfocus(c);
+
 		if (enabled(FocusedOnTop)) {
 			/* Move all visible tiled clients that are not marked as on top below the bar window */
 			wc.stack_mode = Below;
@@ -1728,26 +1758,14 @@ focus(Client *c)
 					wc.sibling = f->win;
 				}
 			}
-		} else {
-			wc.stack_mode = Below;
-			wc.sibling = 0;
-			for (f = c->ws->stack; f; f = f->snext) {
-				if (ISFLOATING(f) && ISVISIBLE(f) && ALWAYSONTOP(f)) {
-					if (!wc.sibling) {
-						XRaiseWindow(dpy, f->win);
-						wc.sibling = f->win;
-					} else {
-						XConfigureWindow(dpy, f->win, CWSibling|CWStackMode, &wc);
-						wc.sibling = f->win;
-					}
-				}
-			}
 		}
+
 		XSync(dpy, False);
 		skipfocusevents();
 		XSetWindowBorder(dpy, c->win, scheme[clientscheme(c, c)][ColBorder].pixel);
 	} else {
-		XSetInputFocus(dpy, root, RevertToPointerRoot, CurrentTime);
+		for (bar = selmon->bar; bar && !bar->showbar; bar = bar->next);
+		XSetInputFocus(dpy, bar ? bar->win : root, RevertToPointerRoot, CurrentTime);
 		XDeleteProperty(dpy, root, netatom[NetActiveWindow]);
 		ws->sel = ws->stack;
 	}
@@ -1801,7 +1819,7 @@ focusmon(const Arg *arg)
 		selws = m->selws;
 	unfocus(sel, 0, NULL);
 	focus(NULL);
-	if (enabled(Warp))
+	if (canwarp(selws))
 		warp(selws->sel);
 }
 
@@ -1845,17 +1863,9 @@ focusstack(const Arg *arg)
 	if (c) {
 		focus(c);
 		if (enabled(FocusedOnTop)) {
-			if (enabled(Warp)) {
+			if (canwarp(c->ws)) {
 				force_warp = 1;
-				if (
-					ISFLOATING(c) || !(c->ws->ltaxis[MASTER] == MONOCLE && (
-						abs(c->ws->ltaxis[LAYOUT]) == NO_SPLIT
-						|| !c->ws->nmaster
-						|| numtiled(ws) <= c->ws->nmaster
-					))
-				) {
-					warp(c);
-				}
+				warp(c);
 			}
 		} else
 			restack(c->ws);
@@ -2190,6 +2200,10 @@ manage(Window w, XWindowAttributes *wa)
 
 	m = c->ws->mon;
 
+	if (WIDTH(c) > m->mw)
+		c->w = m->mw - 2 * c->bw;
+	if (HEIGHT(c) > m->mh)
+		c->h = m->mh - 2 * c->bw;
 	if (c->x + WIDTH(c) > m->mx + m->mw)
 		c->x = m->mx + m->mw - WIDTH(c);
 	if (c->y + HEIGHT(c) > m->my + m->mh)
@@ -2221,7 +2235,7 @@ manage(Window w, XWindowAttributes *wa)
 	/* If this is a transient window for a window that is managed by the window manager, then it should be floating. */
 	if (t)
 		c->prevflags |= Floating;
-	if (!ISFLOATING(c) && (ISFIXED(c) || WASFLOATING(c) || getatomprop(c, clientatom[IsFloating], AnyPropertyType)))
+	if (!ISFLOATING(c) && (ISFIXED(c) || WASFLOATING(c) || getatomprop(c, duskatom[IsFloating], AnyPropertyType)))
 		SETFLOATING(c);
 
 	if (ISFLOATING(c))
@@ -2479,15 +2493,37 @@ propertynotify(XEvent *e)
 {
 	Client *c;
 	Window trans;
+	XEvent ignored;
 	XPropertyEvent *ev = &e->xproperty;
+
+	/* Some programs may end up spamming property notifications rendering the window
+	 * manager unable to do anything else than to process the backlog of these for as
+	 * long as it takes. One may think of it as a DOS attack for the window manager.
+	 * This section handles throttling of such events allowing only three consecutive
+	 * and identical property notifications to be processed. */
+	if (ev->state != pn_prev_state || ev->window != pn_prev_win || ev->atom != pn_prev_atom) {
+		pn_prev_state = ev->state;
+		pn_prev_win = ev->window;
+		pn_prev_atom = ev->atom;
+		pn_prev_count = 0;
+	} else if (pn_prev_count > 3) {
+		if (pn_prev_count == 4 && enabled(Debug)) {
+			pn_prev_count++; /* Only print the below log line once. */
+			fprintf(stderr, "propertynotify: throttling repeating %s (%ld) property notificatons for window %ld\n", XGetAtomName(dpy, ev->atom), ev->atom, ev->window);
+		}
+		while (XCheckMaskEvent(dpy, PropertyChangeMask, &ignored));
+		return;
+	}
+
+	pn_prev_count++;
 
 	if (enabled(Systray) && (c = wintosystrayicon(ev->window))) {
 		if (ev->atom == XA_WM_NORMAL_HINTS) {
 			updatesizehints(c);
 			updatesystrayicongeom(c, c->w, c->h);
-		}
-		else
+		} else {
 			updatesystrayiconstate(c, ev);
+		}
 		drawbarwin(systray->bar);
 	}
 
@@ -2546,7 +2582,7 @@ propertynotify(XEvent *e)
 void
 restart(const Arg *arg)
 {
-	restartsig = 1;
+	restartwm = 1;
 	running = 0;
 }
 
@@ -2554,6 +2590,33 @@ void
 quit(const Arg *arg)
 {
 	running = 0;
+}
+
+void
+raiseclient(Client *c)
+{
+	Client *s, *l = NULL;
+	Workspace *ws = c->ws;
+	XWindowChanges wc;
+
+	/* Do not raise if client is tiled. */
+	if (!ISFLOATING(c) && ws->layout->arrange)
+		return;
+
+	if (!ALWAYSONTOP(c)) {
+		/* find the lowest stacked client that is always on top and place the window below that */
+		for (s = ws->stack; s; s = s->snext)
+			if (ALWAYSONTOP(s) && (ISFLOATING(c) || !ws->layout->arrange))
+				l = s;
+		if (l) {
+			wc.stack_mode = Below;
+			wc.sibling = l->win;
+			XConfigureWindow(dpy, c->win, CWSibling|CWStackMode, &wc);
+			return;
+		}
+	}
+
+	XRaiseWindow(dpy, c->win);
 }
 
 /* This reads the stacking order on the X server side and updates the client
@@ -2666,15 +2729,12 @@ resizeclientpad(Client *c, int x, int y, int w, int h, int tw, int th)
 		return;
 	}
 
-	if (enabled(NoBorders) && ((nexttiled(c->ws->clients) == c && !nexttiled(c->next)))
-		&& (ISFAKEFULLSCREEN(c) || !ISFULLSCREEN(c))
-		&& !ISFLOATING(c)
-		&& c->ws->layout->arrange)
-	{
+	if (noborder(c)) {
 		wc.width += c->bw * 2;
 		wc.height += c->bw * 2;
 		wc.border_width = 0;
 	}
+
 	XConfigureWindow(dpy, c->win, CWX|CWY|CWWidth|CWHeight|CWBorderWidth, &wc);
 	configure(c);
 	XSync(dpy, False);
@@ -2688,8 +2748,10 @@ restack(Workspace *ws)
 
 	if (!ws->sel)
 		return;
-	if (ISFLOATING(ws->sel) || !ws->layout->arrange)
-		XRaiseWindow(dpy, ws->sel->win);
+
+	raiseclient(ws->sel);
+
+	/* Place tiled clients below the bar window */
 	if (ws->layout->arrange) {
 		wc.stack_mode = Below;
 		wc.sibling = ws->mon->bar->win;
@@ -2699,16 +2761,12 @@ restack(Workspace *ws)
 				wc.sibling = c->win;
 			}
 	}
+
 	XSync(dpy, False);
 	skipfocusevents();
 
-	if (enabled(Warp)) {
-		if (ws == selws && (
-			!(ws->ltaxis[MASTER] == MONOCLE && (abs(ws->ltaxis[LAYOUT] == NO_SPLIT || !ws->nmaster || numtiled(ws) <= ws->nmaster)))
-			|| ISFLOATING(ws->sel))
-		)
-			warp(ws->sel);
-	}
+	if (canwarp(ws))
+		warp(ws->sel);
 }
 
 void
@@ -2997,11 +3055,28 @@ setup(void)
 	int i;
 	XSetWindowAttributes wa;
 	Atom utf8string;
+	struct sigaction chld, hup, term;
 
-	/* clean up any zombies immediately */
-	sigchld(0);
-	signal(SIGHUP, sighup);
-	signal(SIGTERM, sigterm);
+	/* Handle children when they terminate. */
+	sigemptyset(&chld.sa_mask);
+	chld.sa_flags = SA_NOCLDSTOP | SA_RESTART;
+	chld.sa_handler = sigchld;
+	sigaction(SIGCHLD, &chld, NULL);
+
+	/* Handle hang up signal */
+	sigemptyset(&hup.sa_mask);
+	hup.sa_flags = SA_RESTART;
+	hup.sa_handler = sighup;
+	sigaction(SIGHUP, &hup, NULL);
+
+	/* Handle terminate signal */
+	sigemptyset(&term.sa_mask);
+	term.sa_flags = SA_RESTART;
+	term.sa_handler = sigterm;
+	sigaction(SIGTERM, &term, NULL);
+
+	/* Clean up any zombies (inherited from .xinitrc etc) immediately. */
+	while (waitpid(-1, NULL, WNOHANG) > 0);
 
 	putenv("_JAVA_AWT_WM_NONREPARENTING=1");
 
@@ -3040,7 +3115,7 @@ setup(void)
 	utf8string = XInternAtom(dpy, "UTF8_STRING", False);
 	motifatom = XInternAtom(dpy, "_MOTIF_WM_HINTS", False);
 	XInternAtoms(dpy, wmatom_names, WMLast, False, wmatom);
-	XInternAtoms(dpy, client_names, ClientLast, False, clientatom);
+	XInternAtoms(dpy, dusk_names, DuskLast, False, duskatom);
 	XInternAtoms(dpy, netatom_names, NetLast, False, netatom);
 	XInternAtoms(dpy, allowed_names, NetWMActionLast, False, allowed);
 	XInternAtoms(dpy, xembed_names, XLast, False, xatom);
@@ -3077,6 +3152,7 @@ setup(void)
 	updatecurrentdesktop();
 	setdesktopnames();
 	setviewport();
+	restorepids();
 	XDeleteProperty(dpy, root, netatom[NetClientList]);
 	XDeleteProperty(dpy, root, netatom[NetClientListStacking]);
 	/* select events */
@@ -3115,14 +3191,6 @@ show(Client *c)
 }
 
 void
-sigchld(int unused)
-{
-	if (signal(SIGCHLD, sigchld) == SIG_ERR)
-		die("can't install SIGCHLD handler:");
-	while (0 < waitpid(-1, NULL, WNOHANG));
-}
-
-void
 skipfocusevents(void)
 {
 	XEvent ev;
@@ -3138,7 +3206,9 @@ spawn(const Arg *arg)
 pid_t
 spawncmd(const Arg *arg, int buttonclick, int orphan)
 {
+	struct sigaction sa;
 	pid_t pid = fork();
+
 	if (pid == 0) {
 
 		if (orphan && fork() != 0)
@@ -3193,6 +3263,13 @@ spawncmd(const Arg *arg, int buttonclick, int orphan)
 		}
 
 		setsid();
+
+		/* Restore SIGCHLD sighandler to default before spawning a program */
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+		sa.sa_handler = SIG_DFL;
+		sigaction(SIGCHLD, &sa, NULL);
+
 		execvp(((char **)arg->v)[1], ((char **)arg->v)+1);
 		fprintf(stderr, "dusk: execvp %s", ((char **)arg->v)[1]);
 		perror(" failed");
@@ -3728,29 +3805,33 @@ void
 zoom(const Arg *arg)
 {
 	Client *c = CLIENT, *at = NULL, *cold, *cprevious = NULL, *p;
+	Workspace *ws;
 	if (!c)
 		return;
 
+	ws = c->ws;
 	if (c && ISFLOATING(c))
 		togglefloating(&((Arg) { .v = c }));
 
-	if (!c->ws->layout->arrange || (c && ISFLOATING(c)) || !c)
+	if (!ws->layout->arrange || (c && ISFLOATING(c)) || !c)
 		return;
 
-	if (c == nexttiled(c->ws->clients)) {
-		p = c->ws->prevzoom;
+	if (c == nexttiled(ws->clients)) {
+		if (ws->prevzoom && ws->prevzoom->ws != ws)
+			ws->prevzoom = NULL;
+		p = ws->prevzoom;
 		at = findbefore(p);
 		if (at)
 			cprevious = nexttiled(at->next);
 		if (!cprevious || cprevious != p) {
-			c->ws->prevzoom = NULL;
+			ws->prevzoom = NULL;
 			if (!c || !(c = nexttiled(c->next)))
 				return;
 		} else
 			c = cprevious;
 	}
 
-	cold = nexttiled(c->ws->clients);
+	cold = nexttiled(ws->clients);
 	if (c != cold && !at)
 		at = findbefore(c);
 
@@ -3759,7 +3840,7 @@ zoom(const Arg *arg)
 
 	/* swap windows instead of pushing the previous one down */
 	if (c != cold && at) {
-		c->ws->prevzoom = cold;
+		ws->prevzoom = cold;
 		if (cold && at != cold) {
 			detach(cold);
 			cold->next = at->next;
@@ -3797,7 +3878,7 @@ main(int argc, char *argv[])
 	run();
 	cleanup();
 	XCloseDisplay(dpy);
-	if (restartsig)
+	if (restartwm)
 		execvp(argv[0], argv);
 	return EXIT_SUCCESS;
 }
