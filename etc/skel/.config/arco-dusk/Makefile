@@ -35,9 +35,6 @@ install: all
 	mkdir -p ${DESTDIR}${MANPREFIX}/man1
 	sed "s/VERSION/${VERSION}/g" < dusk.1 > ${DESTDIR}${MANPREFIX}/man1/dusk.1
 	chmod 644 ${DESTDIR}${MANPREFIX}/man1/dusk.1
-	mkdir -p /usr/share/xsessions
-	test -f /usr/share/xsessions/dusk.desktop || cp -n dusk.desktop /usr/share/xsessions/
-	chmod 644 /usr/share/xsessions/dusk.desktop
 
 uninstall:
 	rm -f ${DESTDIR}${PREFIX}/bin/dusk\
